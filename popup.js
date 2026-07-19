@@ -32,17 +32,42 @@ async function applySpeed(speed) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) return;
 
-  chrome.tabs.sendMessage(tab.id, { type: 'SET_SPEED', speed }, (response) => {
-    if (chrome.runtime.lastError) {
-      status.textContent = 'No video found on this page yet.';
-      return;
-    }
-    if (response && typeof response.videoCount === 'number') {
-      status.textContent = response.videoCount > 0
-        ? `Applied to ${response.videoCount} video${response.videoCount === 1 ? '' : 's'} on this page.`
-        : 'No video found on this page yet.';
-    }
-  });
+  // Enumerate every frame in the tab (including nested/cross-origin iframes)
+  // and message each one individually, summing the results. Relying on a
+  // single broadcast response is unreliable because whichever frame answers
+  // first "wins" the callback, which can mask videos living in a deeper frame.
+  let frames;
+  try {
+    frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+  } catch (e) {
+    frames = [{ frameId: 0 }];
+  }
+
+  let totalVideos = 0;
+  let reachableFrames = 0;
+
+  await Promise.all(
+    frames.map((frame) =>
+      new Promise((resolve) => {
+        chrome.tabs.sendMessage(
+          tab.id,
+          { type: 'SET_SPEED', speed },
+          { frameId: frame.frameId },
+          (response) => {
+            if (!chrome.runtime.lastError && response) {
+              reachableFrames += 1;
+              totalVideos += response.videoCount || 0;
+            }
+            resolve();
+          }
+        );
+      })
+    )
+  );
+
+  status.textContent = totalVideos > 0
+    ? `Applied to ${totalVideos} video${totalVideos === 1 ? '' : 's'} across ${reachableFrames} frame${reachableFrames === 1 ? '' : 's'}.`
+    : `No video found (checked ${frames.length} frame${frames.length === 1 ? '' : 's'}).`;
 }
 
 // Load current speed when popup opens.
